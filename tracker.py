@@ -94,7 +94,6 @@ def save_price(producto_id, precio):
 
 def get_page_html(url):
     """
-    Usa Selenium para abrir una URL (Genérico para cualquier tienda).
     """
     options = Options()
     options.add_argument("--headless")
@@ -180,5 +179,3 @@ if __name__ == "__main__":
 
         print("\nEsperando 30 segundos antes de la siguiente solicitud...")
         time.sleep(30)
-
-    print("\n---[ TRACKING COMPLETO ]---")
