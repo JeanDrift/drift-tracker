@@ -8,6 +8,7 @@ from webdriver_manager.chrome import ChromeDriverManager
 
 # --- Importamos nuestros scrapers ---
 from scrapers import mercadolibre_scraper
+from scrapers import lacuracao_scraper
 
 # (Aquí añadiremos más, ej: from scrapers import lacuracao_scraper)
 
@@ -20,7 +21,7 @@ DB_NAME = "precios.db"
 # con la función 'parse' del scraper correcto.
 SCRAPER_DISPATCH = {
     "MercadoLibre": mercadolibre_scraper.parse,
-    # "LaCuracao": lacuracao_scraper.parse, # <-- Así añadiremos futuras tiendas
+    "LaCuracao": lacuracao_scraper.parse,
 }
 
 
@@ -94,6 +95,7 @@ def save_price(producto_id, precio):
 
 def get_page_html(url):
     """
+    Usa Selenium para abrir una URL (Genérico para cualquier tienda).
     """
     options = Options()
     options.add_argument("--headless")
@@ -179,3 +181,5 @@ if __name__ == "__main__":
 
         print("\nEsperando 30 segundos antes de la siguiente solicitud...")
         time.sleep(30)
+
+    print("\n---[ TRACKING COMPLETO ]---")
