@@ -1,8 +1,8 @@
 import time
 import sqlite3
 import datetime
-import os       # <-- ¡NUEVA IMPORTACIÓN!
-from dotenv import load_dotenv # <-- ¡NUEVA IMPORTACIÓN!
+import os
+from dotenv import load_dotenv
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
@@ -11,7 +11,6 @@ import telegram
 import asyncio
 
 # --- Cargar variables de entorno ---
-# Esto lee tu archivo .env y carga las variables
 load_dotenv()
 
 # --- Importamos nuestros scrapers ---
@@ -19,7 +18,7 @@ from scrapers import mercadolibre_scraper
 from scrapers import lacuracao_scraper
 
 # ==========================================================
-# --- CONFIGURACIÓN DE TELEGRAM (AHORA DESDE .env) ---
+# --- CONFIGURACIÓN DE TELEGRAM (DESDE .env) ---
 # ==========================================================
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
@@ -45,48 +44,33 @@ else:
     print("ADVERTENCIA: TELEGRAM_TOKEN no encontrado en .env. No se enviarán notificaciones.")
 
 
-# ... (El resto de tu código: _async_send_message, send_telegram_notification, setup_database, etc. ...
-# ... NO CAMBIA NADA MÁS ABAJO) ...
-
-
-# --- 2. CREAMOS UNA FUNCIÓN ASYNC DE AYUDA ---
 async def _async_send_message(bot, chat_id, message):
-    """
-    Función de ayuda asíncrona que realmente envía el mensaje.
-    """
     try:
-        await bot.send_message(chat_id=chat_id, text=message)
+        # Usamos parse_mode='Markdown' para los links y negritas
+        await bot.send_message(chat_id=chat_id, text=message, parse_mode='Markdown')
         print("Notificación de Telegram enviada.")
     except Exception as e:
         print(f"Error al enviar notificación de Telegram (async): {e}")
 
 
-# --- 3. MODIFICAMOS LA FUNCIÓN ORIGINAL ---
 def send_telegram_notification(message):
-    """
-    Envía un mensaje de texto a tu chat de Telegram.
-    (Ahora usa asyncio.run() para llamar a la función async).
-    """
     if not bot_telegram:
         print(f"Notificación (simulada): {message}")
         return
-
-    # asyncio.run() ejecuta la función async de forma síncrona
     try:
         asyncio.run(_async_send_message(bot_telegram, CHAT_ID, message))
-    except RuntimeError as e:
-        # Esto maneja errores si asyncio ya se está ejecutando (poco probable aquí)
-        print(f"Error de runtime con asyncio: {e}")
     except Exception as e:
         print(f"Error general en send_telegram_notification: {e}")
 
 
-# --- Funciones de Base de Datos (Sin cambios) ---
+# --- Funciones de Base de Datos (ACTUALIZADAS) ---
 
 def setup_database():
     """Crea las tablas en la base de datos si no existen."""
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
+    cursor.execute("PRAGMA foreign_keys = ON")
+
     cursor.execute('''
     CREATE TABLE IF NOT EXISTS Productos (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -94,7 +78,10 @@ def setup_database():
         nombre TEXT,
         tienda TEXT,
         precio_inicial REAL,
-        precio_objetivo REAL
+        precio_objetivo REAL,
+        notificacion_objetivo_enviada BOOLEAN DEFAULT 0,
+        status TEXT DEFAULT 'ninguno',  -- NUEVA COLUMNA
+        precio_mas_bajo REAL            -- NUEVA COLUMNA
     )
     ''')
     cursor.execute('''
@@ -103,12 +90,12 @@ def setup_database():
         producto_id INTEGER,
         precio REAL,
         fecha DATETIME,
-        FOREIGN KEY (producto_id) REFERENCES Productos (id)
+        FOREIGN KEY (producto_id) REFERENCES Productos (id) ON DELETE CASCADE
     )
     ''')
     conn.commit()
     conn.close()
-    print(f"Base de datos '{DB_NAME}' configurada con nuevas columnas.")
+    print(f"Base de datos '{DB_NAME}' configurada con columnas 'status' y 'precio_mas_bajo'.")
 
 
 def get_all_products_to_track():
@@ -139,53 +126,86 @@ def save_price(producto_id, precio):
     print(f"Nuevo precio guardado: S/ {precio}")
 
 
-# --- Lógica de Notificación (Sin cambios) ---
+# --- Nueva Lógica de Notificación (REESCRITA) ---
 
-def check_and_notify(producto_id, nombre_producto, precio_actual):
+def check_and_notify(producto_id, nombre_producto, precio_actual, producto_url):
     """
-    Comprueba el precio actual contra la BD y envía notificaciones
-    según las reglas definidas por el usuario.
+    Comprueba el precio y envía notificaciones según las nuevas reglas.
+    Actualiza el precio más bajo.
     """
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
 
-    cursor.execute("SELECT precio_inicial, precio_objetivo FROM Productos WHERE id = ?", (producto_id,))
-    datos_alerta = cursor.fetchone()
-
-    if not datos_alerta:
+    # 1. Obtener todos los datos del producto
+    cursor.execute("""
+        SELECT precio_inicial, precio_objetivo, notificacion_objetivo_enviada, precio_mas_bajo, status 
+        FROM Productos WHERE id = ?
+    """, (producto_id,))
+    datos = cursor.fetchone()
+    if not datos:
         conn.close()
         return
 
-    precio_inicial, precio_objetivo = datos_alerta
+    precio_inicial, precio_objetivo, notificacion_enviada, precio_mas_bajo, status = datos
 
+    # 2. Obtener precio anterior
+    cursor.execute("SELECT precio FROM HistorialPrecios WHERE producto_id = ? ORDER BY fecha DESC LIMIT 2",
+                   (producto_id,))
+    precios = cursor.fetchall()
+    precio_anterior = None
+    if len(precios) > 1:
+        precio_anterior = precios[1][0]
+
+        # 3. Lógica de Precio Inicial (Solo se ejecuta una vez)
     if precio_inicial is None:
         cursor.execute("UPDATE Productos SET precio_inicial = ? WHERE id = ?", (precio_actual, producto_id))
         conn.commit()
         print(f"Se guardó el precio inicial: S/ {precio_actual}")
-        send_telegram_notification(
-            f"📈 Nuevo seguimiento\n\nProducto: {nombre_producto}\nPrecio inicial: S/ {precio_actual}"
-        )
-    else:
-        if precio_actual < precio_inicial:
-            mensaje = (
-                f"🚨 ¡BAJÓ DE PRECIO INICIAL! 🚨\n\n"
-                f"Producto: {nombre_producto}\n"
-                f"Precio Anterior (Inicial): S/ {precio_inicial}\n"
-                f"Precio Nuevo: S/ {precio_actual}\n"
-                f"¡Ahorro de S/ {precio_inicial - precio_actual:.2f}!"
-            )
-            send_telegram_notification(mensaje)
 
-    if precio_objetivo is not None:
-        if precio_actual <= precio_objetivo:
+    # 4. Lógica de Precio Más Bajo (NUEVO)
+    if precio_mas_bajo is None or precio_actual < precio_mas_bajo:
+        precio_mas_bajo = precio_actual  # Actualizar la variable local para las notificaciones
+        cursor.execute("UPDATE Productos SET precio_mas_bajo = ? WHERE id = ?", (precio_mas_bajo, producto_id))
+        conn.commit()
+        print(f"¡Nuevo precio más bajo registrado: S/ {precio_mas_bajo}!")
+
+    # Formatear para notificación (evitar 'None')
+    precio_mas_bajo_str = f"S/ {precio_mas_bajo}" if precio_mas_bajo else "N/A"
+    status_str = status.capitalize() if status else "Ninguno"
+
+    # 5. Lógica de Notificaciones
+
+    # Trigger 1: Notificación ESPECIAL de Precio Objetivo
+    if precio_objetivo is not None and precio_actual <= precio_objetivo:
+        if not notificacion_enviada:
             mensaje = (
-                f"🎯 ¡PRECIO OBJETIVO ALCANZADO! 🎯\n\n"
-                f"Producto: {nombre_producto}\n"
+                f"🎯 **¡PRECIO OBJETIVO ALCANZADO!** 🎯\n\n"
+                f"Producto: *{nombre_producto}*\n"
+                f"Status: *{status_str}*\n\n"
                 f"Precio Objetivo: S/ {precio_objetivo}\n"
-                f"Precio Nuevo: S/ {precio_actual}\n"
-                f"¡CORRE!"
+                f"**Precio Nuevo: S/ {precio_actual}**\n"
+                f"Precio Más Bajo: {precio_mas_bajo_str}\n\n"
+                f"[Ver Producto]({producto_url})"
             )
             send_telegram_notification(mensaje)
+            cursor.execute("UPDATE Productos SET notificacion_objetivo_enviada = 1 WHERE id = ?", (producto_id,))
+            conn.commit()
+        else:
+            print("Info: Precio objetivo alcanzado, pero ya se notificó.")
+
+    # Trigger 2: Notificación de CUALQUIER bajada de precio
+    elif precio_anterior is not None and precio_actual < precio_anterior:
+        # Se usa 'elif' para no enviar spam (la notificación de objetivo es prioritaria)
+        mensaje = (
+            f"📉 **¡Bajó de precio!**\n\n"
+            f"Producto: *{nombre_producto}*\n"
+            f"Status: *{status_str}*\n\n"
+            f"Precio Anterior: S/ {precio_anterior}\n"
+            f"**Precio Nuevo: S/ {precio_actual}**\n"
+            f"Precio Más Bajo: {precio_mas_bajo_str}\n\n"
+            f"[Ver Producto]({producto_url})"
+        )
+        send_telegram_notification(mensaje)
 
     conn.close()
 
@@ -218,7 +238,7 @@ def get_page_html(url):
             print("Navegador cerrado.")
 
 
-# --- Bloque Principal (Sin cambios) ---
+# --- Bloque Principal (Sin cambios, solo pasa la URL) ---
 if __name__ == "__main__":
 
     print("---[ INICIANDO TRACKER DE PRECIOS ]---")
@@ -255,7 +275,8 @@ if __name__ == "__main__":
         if titulo and precio:
             save_price(producto_id, precio)
             update_product_name(producto_id, titulo)
-            check_and_notify(producto_id, titulo, precio)
+            # Pasamos la URL para incluirla en las notificaciones
+            check_and_notify(producto_id, titulo, precio, producto_url)
             print("--- Producto procesado exitosamente ---")
         else:
             print(f"--- ERROR: No se pudo extraer título o precio del producto ID {producto_id} ---")
