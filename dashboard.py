@@ -3,13 +3,12 @@ import pandas as pd
 import plotly.express as px
 import sqlite3
 from pathlib import Path
+import database  # <-- ¡NUEVA IMPORTACIÓN!
 
 # --- Configuración de la Página (¡Debe ser lo primero!) ---
 st.set_page_config(page_title="Tracker de Precios", layout="wide")
 
 # --- Constantes ---
-DB_NAME = "precios.db"
-DB_PATH = Path(__file__).parent / DB_NAME
 ITEMS_PER_PAGE = 10  # Productos por página
 
 
@@ -22,7 +21,8 @@ def load_data():
     """
     print("Cargando datos desde la base de datos...")
     try:
-        conn = sqlite3.connect(DB_PATH)
+        # ¡OPTIMIZADO! Usa la ruta centralizada
+        conn = sqlite3.connect(database.DB_PATH)
         query = """
         SELECT
             P.id as producto_id, 
@@ -37,12 +37,8 @@ def load_data():
         df = pd.read_sql(query, conn)
         conn.close()
 
-        # --- LÍNEA CORREGIDA ---
-        # Usamos format='mixed' para que acepte TODOS los formatos de fecha
-        # que tenemos en la base de datos (con 'T' y con espacio).
         df['fecha'] = pd.to_datetime(df['fecha'], format='mixed')
 
-        # Crear una columna de display para el selector (si la necesitamos)
         if 'nombre' in df.columns:
             df['producto_display'] = df['nombre'] + " (" + df['tienda'] + ")"
 
@@ -60,7 +56,6 @@ def show_detail_page(df, product_id):
     Muestra la página de detalles (métricas y gráfico) para UN producto.
     """
     try:
-        # 1. Filtrar datos para este producto
         product_data = df[df['producto_id'] == product_id]
 
         if product_data.empty:
@@ -71,13 +66,11 @@ def show_detail_page(df, product_id):
         display_name = product_data.iloc[0]['producto_display']
         st.title(display_name)
 
-        # 2. Calcular Métricas
         latest_price = product_data.iloc[-1]['precio']
         lowest_price = product_data['precio'].min()
         highest_price = product_data['precio'].max()
         avg_price = product_data['precio'].mean()
 
-        # 3. Mostrar Métricas en columnas
         st.header("Estadísticas Clave")
         col1, col2, col3, col4 = st.columns(4)
         col1.metric("Precio Actual", f"S/ {latest_price:,.2f}")
@@ -85,7 +78,6 @@ def show_detail_page(df, product_id):
         col3.metric("Precio Más Alto", f"S/ {highest_price:,.2f}")
         col4.metric("Precio Promedio", f"S/ {avg_price:,.2f}")
 
-        # 4. Mostrar Gráfico (aprovechando ancho)
         st.header("Historial de Precios")
         fig = px.line(
             product_data,
@@ -99,12 +91,10 @@ def show_detail_page(df, product_id):
         fig.update_yaxes(range=[min_price * 0.98, max_price * 1.02])
         st.plotly_chart(fig, use_container_width=True)
 
-        # 5. Mostrar Historial
         st.header("Tabla de Historial")
         st.dataframe(product_data[['fecha', 'precio']].sort_values(by='fecha', ascending=False),
                      use_container_width=True)
 
-        # 6. Botón de Volver
         st.divider()
         st.markdown("<a href='/' target='_self'>&larr; Volver a la lista</a>", unsafe_allow_html=True)
 
@@ -122,7 +112,6 @@ def show_main_page(df):
     """
     st.title("📊 Dashboard de Historial de Precios")
 
-    # 1. Obtener lista de productos únicos
     product_list = df.drop_duplicates(subset=['producto_id'])
 
     if product_list.empty:
@@ -130,11 +119,9 @@ def show_main_page(df):
         st.info("Ejecuta 'python tracker.py' para empezar a recolectar datos.")
         return
 
-    # 2. Lógica de Paginación
     total_products = len(product_list)
     total_pages = max(1, (total_products + ITEMS_PER_PAGE - 1) // ITEMS_PER_PAGE)
 
-    # Contenedor para la paginación
     pagination_container = st.container()
     with pagination_container:
         col1, col2 = st.columns([0.8, 0.2])
@@ -147,27 +134,19 @@ def show_main_page(df):
             label_visibility="collapsed"
         )
 
-    # 3. Filtrar productos para la página actual
     start_index = (current_page - 1) * ITEMS_PER_PAGE
     end_index = start_index + ITEMS_PER_PAGE
     products_to_show = product_list.iloc[start_index:end_index]
 
-    # 4. Iterar y mostrar cada producto
     for _, product in products_to_show.iterrows():
         product_id = product['producto_id']
         display_name = product['producto_display']
 
-        # Usamos un contenedor para cada producto
         with st.container(border=True):
-
-            # --- TÍTULO (Clickeable) ---
-            # Usamos markdown para crear un link que añade "?producto_id=X" a la URL
             st.markdown(
                 f"## <a href='/?producto_id={product_id}' target='_self' style='text-decoration:none; color:inherit;'>{display_name}</a>",
                 unsafe_allow_html=True
             )
-
-            # --- GRÁFICO (debajo del título) ---
             product_data = df[df['producto_id'] == product_id]
 
             if product_data.empty or product_data.shape[0] < 2:
@@ -189,15 +168,17 @@ def show_main_page(df):
 # --- LÓGICA PRINCIPAL (ROUTER) ---
 # ==================================================================
 
-# Cargar los datos una sola vez
+# 1. Asegurar que la BD exista
+database.setup_database()
+
+# 2. Cargar los datos
 data = load_data()
 
-# Obtener los parámetros de la URL
+# 3. Obtener parámetros de la URL
 query_params = st.query_params
 
-# Decidir qué página mostrar
+# 4. Decidir qué página mostrar
 if "producto_id" in query_params:
-    # Si la URL tiene ?producto_id=X, mostrar la página de detalle
     try:
         product_id = int(query_params.get("producto_id"))
         show_detail_page(data, product_id)
@@ -205,5 +186,4 @@ if "producto_id" in query_params:
         st.error("ID de producto no válido.")
         st.markdown("<a href='/' target='_self'>&larr; Volver a la lista</a>", unsafe_allow_html=True)
 else:
-    # Si no, mostrar la página principal
     show_main_page(data)

@@ -1,7 +1,6 @@
 import sqlite3
 from urllib.parse import urlparse
-
-DB_NAME = "precios.db"
+import database  # <-- ¡NUEVA IMPORTACIÓN!
 
 
 def detect_store(url):
@@ -14,15 +13,15 @@ def detect_store(url):
 
 
 def add_new_product():
-    print("---[ Añadir Nuevo Producto al Tracker ]---")
+    # 1. Asegurar que la BD exista
+    database.setup_database()
 
-    # 1. Pedir URL
+    print("---[ Añadir Nuevo Producto al Tracker ]---")
     url = input("Pega la URL completa del producto: ").strip()
     if not url:
         print("Error: La URL no puede estar vacía.")
         return
 
-    # 2. Detectar Tienda
     tienda = detect_store(url)
     if not tienda:
         print(f"No se pudo detectar la tienda para: {url}")
@@ -34,29 +33,25 @@ def add_new_product():
         print("Error: La tienda no puede estar vacía.")
         return
 
-    # 3. Pedir Precio Objetivo (¡NUEVO!)
     precio_objetivo_input = input("Ingresa un precio objetivo (opcional, ej: 2500): ").strip()
     precio_objetivo = None
     try:
         if precio_objetivo_input:
             precio_objetivo = float(precio_objetivo_input)
-            print(f"Se rastreará un precio objetivo de: S/ {precio_objetivo}")
     except ValueError:
         print("Precio objetivo no válido, se guardará sin precio objetivo.")
-        precio_objetivo = None
 
-    # 4. Conectarse a la BD
-    conn = sqlite3.connect(DB_NAME)
+    conn = database.get_db_conn()  # <-- OPTIMIZADO
     cursor = conn.cursor()
 
     try:
-        # ¡ACTUALIZADO! Añadimos el precio_objetivo (precio_inicial se deja NULO)
         cursor.execute(
             "INSERT INTO Productos (url, nombre, tienda, precio_inicial, precio_objetivo) VALUES (?, ?, ?, ?, ?)",
             (url, None, tienda, None, precio_objetivo)
         )
         conn.commit()
         print(f"\n¡Éxito! Producto añadido.")
+        print("El bot de Telegram o el tracker lo procesarán pronto.")
 
     except sqlite3.IntegrityError:
         print("\nError: Esta URL ya existe en la base de datos.")

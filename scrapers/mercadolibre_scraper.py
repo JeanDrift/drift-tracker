@@ -5,17 +5,20 @@ from bs4 import BeautifulSoup
 def parse(html):
     """
     Analiza el HTML de una página de producto de MercadoLibre.
-    Devuelve (titulo, precio) o (None, None) si falla.
+    (Versión 2: Añade scraping de status).
+    Devuelve (titulo, precio, status).
     """
     if html is None:
         print("No hay HTML para analizar.")
-        return None, None
+        return None, None, "ninguno"
 
-    print("\n--- [Scraper: MercadoLibre] Iniciando Análisis ---")
+    print("\n--- [Scraper: MercadoLibre V2] Iniciando Análisis ---")
     soup = BeautifulSoup(html, 'html.parser')
 
     product_title = None
     product_price = None
+    # Por defecto, asumimos "no disponible" según tu lógica
+    product_status = "no disponible"
 
     # --- 1. Extraer el Título ---
     try:
@@ -25,7 +28,6 @@ def parse(html):
             print(f"TÍTULO ENCONTRADO: {product_title}")
         else:
             print("ERROR: No se pudo encontrar el TÍTULO.")
-
     except Exception as e:
         print(f"Error al procesar el título: {e}")
 
@@ -52,9 +54,28 @@ def parse(html):
             print(f"PRECIO FINAL ENCONTRADO: S/ {product_price}")
         else:
             print("ERROR: No se pudo encontrar ningún selector de precio válido.")
-
     except Exception as e:
         print(f"Error al procesar el precio: {e}")
 
-    print("--- [Scraper: MercadoLibre] Análisis Terminado ---")
-    return product_title, product_price
+    # --- 3. Extraer el Status (NUEVO) ---
+    try:
+        # Caso 1: Hay varias unidades (ej: "+10 disponibles")
+        stock_span = soup.find('button', class_='andes-button andes-spinner__icon-base ui-pdp-action--primary andes-button--loud')
+
+        if stock_span and "Comprar ahora" in stock_span.get_text():
+            product_status = "disponible"
+            print("STATUS ENCONTRADO: Disponible (Stock múltiple)")
+
+        else:
+            # Si no se encuentra ninguno de los dos, se queda como "no disponible"
+            print("STATUS ENCONTRADO: No Disponible (No se encontraron selectores de stock)")
+
+    except Exception as e:
+        print(f"Error al procesar el status: {e}")
+        # En caso de error, es más seguro asumir "no disponible"
+        product_status = "no disponible"
+
+    print("--- [Scraper: MercadoLibre V2] Análisis Terminado ---")
+
+    # Devolver los 3 valores
+    return product_title, product_price, product_status
