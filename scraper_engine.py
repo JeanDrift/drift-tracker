@@ -198,34 +198,40 @@ def _get_page_html(url):
             log.info("Navegador cerrado.")
 
 
-def _scrape_and_save(product_id, producto_url, tienda):
-    log.info(f"\n---[ Procesando Producto ID: {product_id} (Tienda: {tienda}) ]---")
+def _scrape_and_save(p_id, p_url, p_tienda):
+    """
+    Función interna que hace el trabajo para un producto.
+    Devuelve True si tuvo éxito, False si falló.
+    (Parámetros renombrados para evitar NameError)
+    """
+    log.info(f"\n---[ Procesando Producto ID: {p_id} (Tienda: {p_tienda}) ]---")
 
-    if tienda not in SCRAPER_DISPATCH:
-        log.error(f"ERROR: No se encontró un scraper para la tienda '{tienda}'.")
+    if p_tienda not in SCRAPER_DISPATCH:
+        log.error(f"ERROR: No se encontró un scraper para la tienda '{p_tienda}'.")
         return False
 
-    html_content = _get_page_html(producto_url)
+    html_content = _get_page_html(p_url)
     if not html_content:
-        log.error(f"ERROR: No se pudo obtener el HTML para el producto ID {product_id}.")
+        log.error(f"ERROR: No se pudo obtener el HTML para el producto ID {p_id}.")
         return False
 
     try:
-        parser_func = SCRAPER_DISPATCH[tienda]
+        parser_func = SCRAPER_DISPATCH[p_tienda]
         titulo, precio, status = parser_func(html_content)
     except Exception as e:
-        log.critical(f"El scraper '{tienda}' falló con una excepción: {e}")
+        log.critical(f"El scraper '{p_tienda}' falló con una excepción: {e}")
         titulo, precio, status = None, None, None
 
     if titulo and precio:
-        save_price(producto_id, precio)
-        update_product_name(producto_id, titulo)
-        update_product_status(producto_id, status)
-        check_and_notify(producto_id, titulo, precio, producto_url, status)
+        # Usamos los parámetros renombrados
+        save_price(p_id, precio)
+        update_product_name(p_id, titulo)
+        update_product_status(p_id, status)
+        check_and_notify(p_id, titulo, precio, p_url, status)
         log.info("--- Producto procesado exitosamente ---")
         return True
     else:
-        log.error(f"--- ERROR: No se pudo extraer título o precio del producto ID {product_id} ---")
+        log.error(f"--- ERROR: No se pudo extraer título o precio del producto ID {p_id} ---")
         return False
 
 
