@@ -16,10 +16,15 @@ import logging
 from scrapers import mercadolibre_scraper
 from scrapers import lacuracao_scraper
 import database
-import log_setup  # <-- ¡NUEVA IMPORTACIÓN!
+import log_setup
 
 # --- Configurar Logger ---
 log = log_setup.setup_logging('scraper_engine')
+
+# --- SILENCIAR LOGS DE WDM (Webdriver Manager) ---
+# Esto evita que el log se llene de mensajes de descarga del driver
+logging.getLogger('WDM').setLevel(logging.ERROR)
+os.environ['WDM_LOG_LEVEL'] = '0'
 
 # --- Cargar .env ---
 load_dotenv()
@@ -165,44 +170,62 @@ def check_and_notify(producto_id, nombre_producto, precio_actual, producto_url, 
 # --- Funciones de Scraping (El "Motor") ---
 
 def _get_page_html(url):
+    """
+    Función interna de Selenium.
+    Configurada para alta estabilidad en servidores.
+    """
     options = Options()
     options.add_argument("--headless")
     options.add_argument("--disable-gpu")
+
+    # --- Argumentos de Estabilidad para Servidores ---
+    options.add_argument("--no-sandbox")  # Crítico para servidores
+    options.add_argument("--disable-dev-shm-usage")  # Evita crashes por memoria compartida
+    options.add_argument("--disable-extensions")
+    options.add_argument("--remote-debugging-pipe")  # Mejora estabilidad moderna
+
+    # User Agent común
     options.add_argument(
-        "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/90.0.4430.212 Safari/537.36")
-    service = Service(ChromeDriverManager().install())
+        "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+
     driver = None
     try:
+        # Intentamos instalar/actualizar el driver
+        # Si falla (por internet), reintentamos una vez
+        try:
+            service = Service(ChromeDriverManager().install())
+        except Exception as e:
+            log.warning(f"Fallo al actualizar driver (posible error de red). Reintentando en 5s... Error: {e}")
+            time.sleep(5)
+            service = Service(ChromeDriverManager().install())
+
         driver = webdriver.Chrome(service=service, options=options)
+
         log.info(f"Abriendo: {url}...")
         driver.get(url)
+
         log.info(f"Esperando {SCRAPING_WAIT_TIME} segundos...")
         time.sleep(SCRAPING_WAIT_TIME)
+
         page_html = driver.page_source
         log.info("Página cargada y HTML obtenido.")
-
-        # Opcional: guardar debug HTML si falla algo
-        # if "mercadolibre" in url.lower():
-        #     debug_path = database.BASE_DIR / "debug_ml.html"
-        #     with open(debug_path, "w", encoding="utf-8") as f:
-        #         f.write(page_html)
-        #     log.info(f"HTML de MercadoLibre guardado en {debug_path}!")
-
         return page_html
+
     except Exception as e:
         log.error(f"Error al obtener la página: {e}")
         return None
     finally:
         if driver:
-            driver.quit()
+            try:
+                driver.quit()
+            except:
+                pass
             log.info("Navegador cerrado.")
 
 
 def _scrape_and_save(p_id, p_url, p_tienda):
     """
     Función interna que hace el trabajo para un producto.
-    Devuelve True si tuvo éxito, False si falló.
-    (Parámetros renombrados para evitar NameError)
     """
     log.info(f"\n---[ Procesando Producto ID: {p_id} (Tienda: {p_tienda}) ]---")
 
@@ -223,7 +246,6 @@ def _scrape_and_save(p_id, p_url, p_tienda):
         titulo, precio, status = None, None, None
 
     if titulo and precio:
-        # Usamos los parámetros renombrados
         save_price(p_id, precio)
         update_product_name(p_id, titulo)
         update_product_status(p_id, status)
