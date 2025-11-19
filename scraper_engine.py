@@ -21,8 +21,7 @@ import log_setup
 # --- Configurar Logger ---
 log = log_setup.setup_logging('scraper_engine')
 
-# --- SILENCIAR LOGS DE WDM (Webdriver Manager) ---
-# Esto evita que el log se llene de mensajes de descarga del driver
+# --- SILENCIAR LOGS DE WDM ---
 logging.getLogger('WDM').setLevel(logging.ERROR)
 os.environ['WDM_LOG_LEVEL'] = '0'
 
@@ -170,32 +169,22 @@ def check_and_notify(producto_id, nombre_producto, precio_actual, producto_url, 
 # --- Funciones de Scraping (El "Motor") ---
 
 def _get_page_html(url):
-    """
-    Función interna de Selenium.
-    Configurada para alta estabilidad en servidores.
-    """
     options = Options()
     options.add_argument("--headless")
     options.add_argument("--disable-gpu")
-
-    # --- Argumentos de Estabilidad para Servidores ---
-    options.add_argument("--no-sandbox")  # Crítico para servidores
-    options.add_argument("--disable-dev-shm-usage")  # Evita crashes por memoria compartida
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-extensions")
-    options.add_argument("--remote-debugging-pipe")  # Mejora estabilidad moderna
-
-    # User Agent común
+    options.add_argument("--remote-debugging-pipe")
     options.add_argument(
         "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
 
     driver = None
     try:
-        # Intentamos instalar/actualizar el driver
-        # Si falla (por internet), reintentamos una vez
         try:
             service = Service(ChromeDriverManager().install())
         except Exception as e:
-            log.warning(f"Fallo al actualizar driver (posible error de red). Reintentando en 5s... Error: {e}")
+            log.warning(f"Fallo al actualizar driver (red). Reintentando en 5s... Error: {e}")
             time.sleep(5)
             service = Service(ChromeDriverManager().install())
 
@@ -224,9 +213,7 @@ def _get_page_html(url):
 
 
 def _scrape_and_save(p_id, p_url, p_tienda):
-    """
-    Función interna que hace el trabajo para un producto.
-    """
+    # Parámetros renombrados para evitar scope issues
     log.info(f"\n---[ Procesando Producto ID: {p_id} (Tienda: {p_tienda}) ]---")
 
     if p_tienda not in SCRAPER_DISPATCH:
@@ -257,7 +244,7 @@ def _scrape_and_save(p_id, p_url, p_tienda):
         return False
 
 
-# --- Funciones Públicas (Para llamar desde otros scripts) ---
+# --- Funciones Públicas ---
 
 def track_single_product(product_id):
     log.info(f"Solicitud de tracking para UN solo producto: ID {product_id}")
@@ -282,12 +269,28 @@ def get_product_count():
 
 
 def track_all_products():
+    """
+    Rastrea TODOS los productos.
+    Incluye lógica de recuperación ante archivos de bloqueo 'zombie'.
+    """
     log.info("Solicitud de tracking para TODOS los productos...")
-    producto_id = None
 
+    # --- LÓGICA MEJORADA DEL CANDADO ---
     if LOCK_FILE.exists():
-        log.warning("Ya hay un proceso de tracking en ejecución. Omitiendo.")
-        return
+        # Verificar antigüedad del archivo
+        try:
+            file_age = time.time() - LOCK_FILE.stat().st_mtime
+            # Si el archivo tiene más de 2 horas (7200 segundos), es un zombie de un corte de luz
+            if file_age > 7200:
+                log.warning(
+                    f"⚠️ Archivo de bloqueo antiguo encontrado ({int(file_age / 60)} mins). Eliminando candado zombie.")
+                LOCK_FILE.unlink()
+            else:
+                log.warning("Ya hay un proceso de tracking reciente en ejecución. Omitiendo este ciclo.")
+                return False
+        except Exception as e:
+            log.error(f"Error verificando archivo de bloqueo: {e}. Forzando eliminación.")
+            if LOCK_FILE.exists(): LOCK_FILE.unlink()
 
     try:
         LOCK_FILE.touch()
@@ -301,7 +304,7 @@ def track_all_products():
 
         if not productos:
             log.info("No hay productos en la BD para revisar.")
-            return
+            return True
 
         log.info(f"Se van a revisar {len(productos)} producto(s).")
 
@@ -312,9 +315,11 @@ def track_all_products():
             time.sleep(POST_SCRAPE_SLEEP)
 
         log.info("\n---[ TRACKING COMPLETO ]---")
+        return True
 
     except Exception as e:
         log.critical(f"Ocurrió un error fatal durante track_all_products: {e}", exc_info=True)
+        return False
 
     finally:
         if LOCK_FILE.exists():
