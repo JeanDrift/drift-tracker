@@ -39,6 +39,9 @@ def setup_logging(script_name: str):
     # 4. Configurar el logger
     logger = logging.getLogger(script_name)
     logger.setLevel(logging.INFO)
+    
+    # EVITAR DOBLE LOGGING: No propagar al root logger
+    logger.propagate = False
 
     # Evitar que se añadan múltiples handlers si se importa varias veces
     if logger.hasHandlers():
@@ -54,6 +57,7 @@ def setup_logging(script_name: str):
 
     # 6. Redirigir todos los 'print' y 'errores' a este logger
     # Esto captura errores de librerías (como 'database is locked')
+    # Nota: basicConfig configura el ROOT logger. Si propagate fuera True, saldría doble.
     logging.basicConfig(
         level=logging.INFO,
         format='%(asctime)s [%(levelname)-8s] [%(name)s] %(message)s',

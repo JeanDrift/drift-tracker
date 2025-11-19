@@ -1,8 +1,8 @@
 import time
+import asyncio
 import scraper_engine
 import database
 import log_setup
-import logging
 
 # --- Configurar Logger ---
 log = log_setup.setup_logging('tracker')
@@ -14,19 +14,18 @@ if __name__ == "__main__":
         database.setup_database()
     except Exception as e:
         log.critical(f"No se pudo inicializar la base de datos: {e}", exc_info=True)
-        exit()
+        exit(1)
 
-    log.info(f"Iniciando bucle principal. Se ejecutará cada {HOURS_BETWEEN_RUNS} hora(s).")
+    log.info("Iniciando servicio de Tracker en segundo plano...")
 
     while True:
         try:
-            # Ejecutar tracking
-            success = scraper_engine.track_all_products()
-
-            if success:
-                log.info("Ciclo ejecutado correctamente.")
-            else:
-                log.warning("El ciclo fue omitido (probablemente por ejecución simultánea).")
+            log.info("--- Iniciando ciclo de rastreo ---")
+            
+            # Ejecutar el tracking asíncrono
+            asyncio.run(scraper_engine.track_all_products())
+            
+            log.info("--- Ciclo finalizado ---")
 
             # Dormir
             sleep_seconds = HOURS_BETWEEN_RUNS * 60 * 60

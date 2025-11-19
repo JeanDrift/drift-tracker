@@ -1,18 +1,29 @@
 import re
 from bs4 import BeautifulSoup
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
 
-
-def parse(html):
+def parse(driver):
     """
-    Analiza el HTML de una página de producto de MercadoLibre.
-    (Versión 2: Añade scraping de status).
+    Analiza la página de MercadoLibre usando Selenium y WebDriverWait.
     Devuelve (titulo, precio, status).
     """
-    if html is None:
-        print("No hay HTML para analizar.")
+    print("\n--- [Scraper: MercadoLibre V3 (Smart Wait)] Iniciando Análisis ---")
+    
+    try:
+        # Esperar inteligentemente a que cargue el título (elemento clave)
+        # Máximo 10 segundos
+        WebDriverWait(driver, 10).until(
+            EC.presence_of_element_located((By.CLASS_NAME, "ui-pdp-title"))
+        )
+        print("Elemento clave encontrado. Procesando HTML...")
+    except Exception as e:
+        print(f"Timeout esperando carga de página: {e}")
         return None, None, "ninguno"
 
-    print("\n--- [Scraper: MercadoLibre V2] Iniciando Análisis ---")
+    # Obtenemos el HTML ya cargado
+    html = driver.page_source
     soup = BeautifulSoup(html, 'html.parser')
 
     product_title = None
@@ -75,7 +86,7 @@ def parse(html):
         # En caso de error, es más seguro asumir "no disponible"
         product_status = "no disponible"
 
-    print("--- [Scraper: MercadoLibre V2] Análisis Terminado ---")
+    print("--- [Scraper: MercadoLibre V3] Análisis Terminado ---")
 
     # Devolver los 3 valores
     return product_title, product_price, product_status

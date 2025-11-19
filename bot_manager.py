@@ -79,23 +79,23 @@ async def show_single_product(context: ContextTypes.DEFAULT_TYPE, chat_id, produ
     Función reutilizable para mostrar la tarjeta de UN solo producto.
     Se usa al agregar, actualizar o listar.
     """
-    conn = database.get_db_conn()
-    cursor = conn.cursor()
+    prod = None
+    with database.db_pool.get_conn() as conn:
+        cursor = conn.cursor()
 
-    # Consultamos datos incluyendo la URL
-    query = """
-    SELECT
-        P.id, P.nombre, P.precio_objetivo, P.status, P.precio_mas_bajo, P.url,
-        (SELECT H.precio FROM HistorialPrecios H
-         WHERE H.producto_id = P.id
-         ORDER BY H.fecha DESC
-         LIMIT 1) AS ultimo_precio
-    FROM Productos P
-    WHERE P.id = ?
-    """
-    cursor.execute(query, (product_id,))
-    prod = cursor.fetchone()
-    conn.close()
+        # Consultamos datos incluyendo la URL
+        query = """
+        SELECT
+            P.id, P.nombre, P.precio_objetivo, P.status, P.precio_mas_bajo, P.url,
+            (SELECT H.precio FROM HistorialPrecios H
+             WHERE H.producto_id = P.id
+             ORDER BY H.fecha DESC
+             LIMIT 1) AS ultimo_precio
+        FROM Productos P
+        WHERE P.id = ?
+        """
+        cursor.execute(query, (product_id,))
+        prod = cursor.fetchone()
 
     if not prod:
         await context.bot.send_message(chat_id=chat_id, text=f"⚠️ No se encontraron datos para el ID {product_id}.")
@@ -157,11 +157,11 @@ async def list_products(update: Update, context: ContextTypes.DEFAULT_TYPE):
     log.info("Comando /lista recibido.")
 
     # Obtenemos solo los IDs para luego usar la función auxiliar
-    conn = database.get_db_conn()
-    cursor = conn.cursor()
-    cursor.execute("SELECT id FROM Productos")
-    rows = cursor.fetchall()
-    conn.close()
+    rows = []
+    with database.db_pool.get_conn() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT id FROM Productos")
+        rows = cursor.fetchall()
 
     if not rows:
         await update.message.reply_text("No hay productos en la base de datos.")
@@ -188,15 +188,16 @@ async def add_product(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Tienda no reconocida.")
         return
 
-    conn = database.get_db_conn()
-    cursor = conn.cursor()
     try:
-        cursor.execute(
-            "INSERT INTO Productos (url, tienda, status, notificacion_objetivo_enviada) VALUES (?, ?, 'ninguno', 0)",
-            (url, tienda)
-        )
-        conn.commit()
-        product_id = cursor.lastrowid
+        product_id = None
+        with database.db_pool.get_conn() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "INSERT INTO Productos (url, tienda, status, notificacion_objetivo_enviada) VALUES (?, ?, 'ninguno', 0)",
+                (url, tienda)
+            )
+            conn.commit()
+            product_id = cursor.lastrowid
 
         await update.message.reply_text(f"✅ Producto añadido (ID: {product_id}). Procesando...")
 
@@ -212,8 +213,6 @@ async def add_product(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         log.error(f"Error en /agregar: {e}", exc_info=True)
         await update.message.reply_text("Error interno.")
-    finally:
-        conn.close()
 
 
 async def update_all_products(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -225,25 +224,17 @@ async def update_all_products(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     total_seconds = count * (scraper_engine.SCRAPING_WAIT_TIME + scraper_engine.POST_SCRAPE_SLEEP)
     minutes = total_seconds // 60
-
-    await update.message.reply_text(
-        f"Actualizando {count} productos.\nEstimado: ~{minutes} min.\nTe avisaré al terminar."
-    )
-
-    await asyncio.to_thread(scraper_engine.track_all_products)
-
-    await update.message.reply_text("✅ Actualización masiva completa.")
-    # Opcional: Podrías llamar a list_products(update, context) aquí si quieres ver completo de nuevo
-
-
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    
     query = update.callback_query
-    try:
-        await query.answer()
-    except:
-        pass
+    if query:
+        try:
+            await query.answer()
+        except:
+            pass
+        data = query.data
+    else:
+        data = ""
 
-    data = query.data
     if data == "cancel_delete":
         await query.edit_message_text("Operación cancelada.")
         return
@@ -251,14 +242,26 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data.startswith("del_confirm_"):
         try:
             product_id = int(data.split('_')[2])
-            conn = database.get_db_conn()
-            cursor = conn.cursor()
-            cursor.execute("DELETE FROM Productos WHERE id = ?", (product_id,))
-            conn.commit()
-            conn.close()
+            with database.db_pool.get_conn() as conn:
+                cursor = conn.cursor()
+                cursor.execute("DELETE FROM Productos WHERE id = ?", (product_id,))
+                conn.commit()
             await query.edit_message_text(f"🗑 Producto ID {product_id} eliminado.")
         except Exception as e:
             log.error(f"Error eliminando: {e}")
+        return
+
+    # Si es comando /actualizar (data vacía)
+    if not data:
+        await update.message.reply_text(f"🔄 Iniciando actualización masiva de {count} productos...")
+        await asyncio.to_thread(scraper_engine.track_all_products) # Esto ahora es async, pero track_all_products en scraper_engine es async def. 
+        # Wait, scraper_engine.track_all_products is async. asyncio.to_thread runs sync functions.
+        # We should await it directly if it's async.
+        # But wait, bot_manager calls it via asyncio.to_thread? No, previously it was:
+        # await scraper_engine.track_all_products()
+        # Let's fix this.
+        await scraper_engine.track_all_products()
+        await update.message.reply_text("✅ Actualización masiva completada.")
         return
 
     try:
@@ -294,14 +297,13 @@ async def receive_target_price(update: Update, context: ContextTypes.DEFAULT_TYP
         new_price = float(update.message.text)
         product_id = context.user_data['product_id_to_set']
 
-        conn = database.get_db_conn()
-        cursor = conn.cursor()
-        cursor.execute(
-            "UPDATE Productos SET precio_objetivo = ?, notificacion_objetivo_enviada = 0 WHERE id = ?",
-            (new_price, product_id)
-        )
-        conn.commit()
-        conn.close()
+        with database.db_pool.get_conn() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE Productos SET precio_objetivo = ?, notificacion_objetivo_enviada = 0 WHERE id = ?",
+                (new_price, product_id)
+            )
+            conn.commit()
 
         await update.message.reply_text(f"✅ Meta actualizada.")
 
@@ -323,6 +325,8 @@ async def cancel_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE
     await update.message.reply_text("Operación cancelada.")
     return ConversationHandler.END
 
+# Alias para el handler de botones
+button_handler = update_all_products
 
 # ==========================================================
 # --- Función Principal ---

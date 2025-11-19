@@ -1,8 +1,10 @@
+
 import time
 import sqlite3
 import datetime
 import os
 import asyncio
+import random
 from pathlib import Path
 from dotenv import load_dotenv
 from selenium import webdriver
@@ -32,12 +34,14 @@ CHAT_ID = os.getenv("CHAT_ID")
 
 # --- Constantes ---
 LOCK_FILE = database.BASE_DIR / "tracker.lock"
-SCRAPING_WAIT_TIME = 7
-POST_SCRAPE_SLEEP = 30
+SCRAPING_WAIT_TIME = 7  # Tiempo base de espera (se puede reducir si usamos waits explícitos en el futuro)
+POST_SCRAPE_SLEEP = 30  # Ya no se usa globalmente, sino dinámico por tienda
 
 SCRAPER_DISPATCH = {
     "MercadoLibre": mercadolibre_scraper.parse,
     "LaCuracao": lacuracao_scraper.parse,
+    "Falabella": None, # Placeholder
+    "Ripley": None     # Placeholder
 }
 
 # --- Inicialización de Telegram ---
@@ -66,109 +70,109 @@ def send_telegram_notification(message):
         log.warning(f"Notificación (simulada): {message}")
         return
     try:
-        asyncio.run(_async_send_message(bot_telegram, CHAT_ID, message))
+        # Creamos un loop temporal si no existe, o usamos el actual
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(_async_send_message(bot_telegram, CHAT_ID, message))
+        except RuntimeError:
+            asyncio.run(_async_send_message(bot_telegram, CHAT_ID, message))
     except Exception as e:
         log.error(f"Error general en send_telegram_notification: {e}")
 
 
 # --- Funciones de Base de Datos ---
 def update_product_name(producto_id, nombre):
-    conn = database.get_db_conn()
-    conn.execute("UPDATE Productos SET nombre = ? WHERE id = ?", (nombre, producto_id))
-    conn.commit()
-    conn.close()
+    with database.db_pool.get_conn() as conn:
+        conn.execute("UPDATE Productos SET nombre = ? WHERE id = ?", (nombre, producto_id))
+        conn.commit()
 
 
 def save_price(producto_id, precio):
-    conn = database.get_db_conn()
-    fecha_iso = datetime.datetime.now().isoformat()
-    conn.execute("INSERT INTO HistorialPrecios (producto_id, precio, fecha) VALUES (?, ?, ?)",
-                 (producto_id, precio, fecha_iso))
-    conn.commit()
-    conn.close()
+    with database.db_pool.get_conn() as conn:
+        fecha_iso = datetime.datetime.now().isoformat()
+        conn.execute("INSERT INTO HistorialPrecios (producto_id, precio, fecha) VALUES (?, ?, ?)",
+                     (producto_id, precio, fecha_iso))
+        conn.commit()
     log.info(f"Nuevo precio guardado: S/ {precio}")
 
 
 def update_product_status(producto_id, status):
     if not status or status == 'ninguno':
         return
-    conn = database.get_db_conn()
-    conn.execute("UPDATE Productos SET status = ? WHERE id = ?", (status, producto_id))
-    conn.commit()
-    conn.close()
+    with database.db_pool.get_conn() as conn:
+        conn.execute("UPDATE Productos SET status = ? WHERE id = ?", (status, producto_id))
+        conn.commit()
     log.info(f"Status actualizado a: {status}")
 
 
 def check_and_notify(producto_id, nombre_producto, precio_actual, producto_url, nuevo_status):
-    conn = database.get_db_conn()
-    cursor = conn.cursor()
+    with database.db_pool.get_conn() as conn:
+        cursor = conn.cursor()
 
-    cursor.execute("""
-        SELECT precio_inicial, precio_objetivo, notificacion_objetivo_enviada, precio_mas_bajo
-        FROM Productos WHERE id = ?
-    """, (producto_id,))
-    datos = cursor.fetchone()
+        cursor.execute("""
+            SELECT precio_inicial, precio_objetivo, notificacion_objetivo_enviada, precio_mas_bajo
+            FROM Productos WHERE id = ?
+        """, (producto_id,))
+        datos = cursor.fetchone()
 
-    if not datos:
-        log.error(f"No se pudieron leer los datos del producto ID {producto_id} para notificar.")
-        conn.close()
-        return
+        if not datos:
+            log.error(f"No se pudieron leer los datos del producto ID {producto_id} para notificar.")
+            return
 
-    precio_inicial, precio_objetivo, notificacion_enviada, precio_mas_bajo = datos
+        precio_inicial, precio_objetivo, notificacion_enviada, precio_mas_bajo = datos
 
-    cursor.execute("SELECT precio FROM HistorialPrecios WHERE producto_id = ? ORDER BY fecha DESC LIMIT 2",
-                   (producto_id,))
-    precios = cursor.fetchall()
-    precio_anterior = None
-    if len(precios) > 1:
-        precio_anterior = precios[1][0]
+        cursor.execute("SELECT precio FROM HistorialPrecios WHERE producto_id = ? ORDER BY fecha DESC LIMIT 2",
+                       (producto_id,))
+        precios = cursor.fetchall()
+        precio_anterior = None
+        if len(precios) > 1:
+            precio_anterior = precios[1][0]
 
-    if precio_inicial is None:
-        cursor.execute("UPDATE Productos SET precio_inicial = ? WHERE id = ?", (precio_actual, producto_id))
-        conn.commit()
-        log.info(f"Se guardó el precio inicial: S/ {precio_actual}")
+        if precio_inicial is None:
+            cursor.execute("UPDATE Productos SET precio_inicial = ? WHERE id = ?", (precio_actual, producto_id))
+            conn.commit()
+            log.info(f"Se guardó el precio inicial: S/ {precio_actual}")
 
-    if precio_mas_bajo is None or precio_actual < precio_mas_bajo:
-        precio_mas_bajo = precio_actual
-        cursor.execute("UPDATE Productos SET precio_mas_bajo = ? WHERE id = ?", (precio_mas_bajo, producto_id))
-        conn.commit()
-        log.info(f"¡Nuevo precio más bajo registrado: S/ {precio_mas_bajo}!")
+        if precio_mas_bajo is None or precio_actual < precio_mas_bajo:
+            precio_mas_bajo = precio_actual
+            cursor.execute("UPDATE Productos SET precio_mas_bajo = ? WHERE id = ?", (precio_mas_bajo, producto_id))
+            conn.commit()
+            log.info(f"¡Nuevo precio más bajo registrado: S/ {precio_mas_bajo}!")
 
-    precio_mas_bajo_str = f"S/ {precio_mas_bajo}" if precio_mas_bajo else "N/A"
-    status_str = nuevo_status.capitalize() if nuevo_status else "Ninguno"
+        precio_mas_bajo_str = f"S/ {precio_mas_bajo}" if precio_mas_bajo else "N/A"
+        status_str = nuevo_status.capitalize() if nuevo_status else "Ninguno"
 
-    if precio_objetivo is not None and precio_actual <= precio_objetivo:
-        if not notificacion_enviada:
+        if precio_objetivo is not None and precio_actual <= precio_objetivo:
+            if not notificacion_enviada:
+                mensaje = (
+                    f"🎯 **¡PRECIO OBJETIVO ALCANZADO!** 🎯\n\n"
+                    f"Producto: *{nombre_producto}*\n"
+                    f"Status: *{status_str}*\n\n"
+                    f"Precio Objetivo: S/ {precio_objetivo}\n"
+                    f"**Precio Nuevo: S/ {precio_actual}**\n"
+                    f"Precio Más Bajo: {precio_mas_bajo_str}\n\n"
+                    f"[Ver Producto]({producto_url})"
+                )
+                send_telegram_notification(mensaje)
+                cursor.execute("UPDATE Productos SET notificacion_objetivo_enviada = 1 WHERE id = ?", (producto_id,))
+                conn.commit()
+        elif precio_anterior is not None and precio_actual < precio_anterior:
             mensaje = (
-                f"🎯 **¡PRECIO OBJETIVO ALCANZADO!** 🎯\n\n"
+                f"📉 **¡Bajó de precio!**\n\n"
                 f"Producto: *{nombre_producto}*\n"
                 f"Status: *{status_str}*\n\n"
-                f"Precio Objetivo: S/ {precio_objetivo}\n"
+                f"Precio Anterior: S/ {precio_anterior}\n"
                 f"**Precio Nuevo: S/ {precio_actual}**\n"
                 f"Precio Más Bajo: {precio_mas_bajo_str}\n\n"
                 f"[Ver Producto]({producto_url})"
             )
             send_telegram_notification(mensaje)
-            cursor.execute("UPDATE Productos SET notificacion_objetivo_enviada = 1 WHERE id = ?", (producto_id,))
-            conn.commit()
-    elif precio_anterior is not None and precio_actual < precio_anterior:
-        mensaje = (
-            f"📉 **¡Bajó de precio!**\n\n"
-            f"Producto: *{nombre_producto}*\n"
-            f"Status: *{status_str}*\n\n"
-            f"Precio Anterior: S/ {precio_anterior}\n"
-            f"**Precio Nuevo: S/ {precio_actual}**\n"
-            f"Precio Más Bajo: {precio_mas_bajo_str}\n\n"
-            f"[Ver Producto]({producto_url})"
-        )
-        send_telegram_notification(mensaje)
-
-    conn.close()
 
 
 # --- Funciones de Scraping (El "Motor") ---
 
-def _get_page_html(url):
+def create_driver():
+    """Crea y retorna una nueva instancia de Chrome Driver."""
     options = Options()
     options.add_argument("--headless")
     options.add_argument("--disable-gpu")
@@ -179,55 +183,78 @@ def _get_page_html(url):
     options.add_argument(
         "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
 
-    driver = None
+from threading import Lock
+
+# ... (existing imports)
+
+# --- Global Lock for Driver Installation ---
+DRIVER_INSTALL_LOCK = Lock()
+
+# ... (rest of code)
+
+def create_driver():
+    """Crea y retorna una nueva instancia de Chrome Driver."""
+    options = Options()
+    options.add_argument("--headless")
+    options.add_argument("--disable-gpu")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--disable-extensions")
+    options.add_argument("--remote-debugging-pipe")
+    options.add_argument(
+        "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+    options.binary_location = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
+
     try:
-        try:
-            service = Service(ChromeDriverManager().install())
-        except Exception as e:
-            log.warning(f"Fallo al actualizar driver (red). Reintentando en 5s... Error: {e}")
-            time.sleep(5)
-            service = Service(ChromeDriverManager().install())
+        # Synchronize driver installation to avoid race conditions
+        with DRIVER_INSTALL_LOCK:
+            try:
+                service = Service(ChromeDriverManager().install())
+            except Exception as e:
+                log.warning(f"Fallo al actualizar driver (red). Reintentando en 5s... Error: {e}")
+                time.sleep(5)
+                service = Service(ChromeDriverManager().install())
 
         driver = webdriver.Chrome(service=service, options=options)
+        return driver
+    except Exception as e:
+        log.error(f"Error fatal creando el driver: {e}")
+        return None
 
-        log.info(f"Abriendo: {url}...")
+
+def _navigate_to_product(url, driver):
+    """Navega a la URL usando el driver existente."""
+    try:
+        log.info(f"Navegando a: {url}...")
         driver.get(url)
-
-        log.info(f"Esperando {SCRAPING_WAIT_TIME} segundos...")
-        time.sleep(SCRAPING_WAIT_TIME)
-
-        page_html = driver.page_source
-        log.info("Página cargada y HTML obtenido.")
-        return page_html
+        # Ya no esperamos aquí. El scraper específico esperará lo que necesite.
+        return True
 
     except Exception as e:
-        log.error(f"Error al obtener la página: {e}")
-        return None
-    finally:
-        if driver:
-            try:
-                driver.quit()
-            except:
-                pass
-            log.info("Navegador cerrado.")
+        log.error(f"Error al navegar a la página {url}: {e}")
+        return False
 
 
-def _scrape_and_save(p_id, p_url, p_tienda):
-    # Parámetros renombrados para evitar scope issues
-    log.info(f"\n---[ Procesando Producto ID: {p_id} (Tienda: {p_tienda}) ]---")
+def _scrape_and_save(p_id, p_url, p_tienda, driver):
+    """Procesa un producto usando un driver específico."""
+    log.info(f"---[ Procesando Producto ID: {p_id} (Tienda: {p_tienda}) ]---")
 
     if p_tienda not in SCRAPER_DISPATCH:
         log.error(f"ERROR: No se encontró un scraper para la tienda '{p_tienda}'.")
         return False
+    
+    parser_func = SCRAPER_DISPATCH[p_tienda]
+    if parser_func is None:
+        log.warning(f"Scraper para {p_tienda} aún no implementado.")
+        return False
 
-    html_content = _get_page_html(p_url)
-    if not html_content:
-        log.error(f"ERROR: No se pudo obtener el HTML para el producto ID {p_id}.")
+    if not _navigate_to_product(p_url, driver):
+        log.error(f"ERROR: No se pudo navegar al producto ID {p_id}.")
         return False
 
     try:
-        parser_func = SCRAPER_DISPATCH[p_tienda]
-        titulo, precio, status = parser_func(html_content)
+        # AHORA PASAMOS EL DRIVER, NO EL HTML
+        titulo, precio, status = parser_func(driver)
     except Exception as e:
         log.critical(f"El scraper '{p_tienda}' falló con una excepción: {e}")
         titulo, precio, status = None, None, None
@@ -239,89 +266,141 @@ def _scrape_and_save(p_id, p_url, p_tienda):
         check_and_notify(p_id, titulo, precio, p_url, status)
         log.info("--- Producto procesado exitosamente ---")
         return True
+    elif status == "no disponible":
+        # Caso especial: Producto no disponible (precio puede ser None)
+        # El usuario solicitó explícitamente SOLO actualizar el status, sin tocar precio ni nombre.
+        update_product_status(p_id, status)
+        log.info(f"--- Producto ID {p_id} marcado como NO DISPONIBLE. (Precio/Nombre intactos) ---")
+        return True
     else:
         log.error(f"--- ERROR: No se pudo extraer título o precio del producto ID {p_id} ---")
         return False
 
 
+async def process_store_products(store_name, products):
+    """
+    Procesa una lista de productos de una misma tienda de forma SECUENCIAL.
+    Se ejecuta en paralelo con otras tiendas.
+    """
+    log.info(f"[Worker: {store_name}] Iniciando. {len(products)} productos en cola.")
+    
+    # Crear driver dedicado para esta tienda
+    driver = await asyncio.to_thread(create_driver)
+    if not driver:
+        log.error(f"[Worker: {store_name}] No se pudo crear el driver. Abortando.")
+        return
+
+    try:
+        for i, prod in enumerate(products):
+            p_id, p_url, p_tienda = prod
+            
+            # Procesar producto (bloqueante para este worker, pero ok porque es su propio hilo lógico)
+            # Usamos to_thread para las operaciones de Selenium que son bloqueantes
+            await asyncio.to_thread(_scrape_and_save, p_id, p_url, p_tienda, driver)
+            
+            # Si no es el último, esperar un tiempo aleatorio
+            if i < len(products) - 1:
+                wait_time = random.uniform(5, 15)
+                log.info(f"[Worker: {store_name}] Esperando {wait_time:.1f}s antes del siguiente...")
+                await asyncio.sleep(wait_time)
+                
+    except Exception as e:
+        log.error(f"[Worker: {store_name}] Error en el ciclo: {e}", exc_info=True)
+    finally:
+        log.info(f"[Worker: {store_name}] Finalizado. Cerrando driver.")
+        try:
+            driver.quit()
+        except:
+            pass
+
+
 # --- Funciones Públicas ---
 
 def track_single_product(product_id):
+    """Rastrea un solo producto (crea su propio driver efímero)."""
     log.info(f"Solicitud de tracking para UN solo producto: ID {product_id}")
-    conn = database.get_db_conn()
-    cursor = conn.cursor()
-    cursor.execute("SELECT url, tienda FROM Productos WHERE id = ?", (product_id,))
-    producto = cursor.fetchone()
-    conn.close()
+    
+    producto = None
+    with database.db_pool.get_conn() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT url, tienda FROM Productos WHERE id = ?", (product_id,))
+        producto = cursor.fetchone()
 
     if producto:
         url, tienda = producto
-        _scrape_and_save(product_id, url, tienda)
+        driver = create_driver()
+        if driver:
+            try:
+                _scrape_and_save(product_id, url, tienda, driver)
+            finally:
+                driver.quit()
     else:
         log.error(f"ERROR: No se encontró el producto ID {product_id} para el tracking individual.")
 
 
 def get_product_count():
-    conn = database.get_db_conn()
-    count = conn.execute("SELECT COUNT(*) FROM Productos").fetchone()[0]
-    conn.close()
+    with database.db_pool.get_conn() as conn:
+        count = conn.execute("SELECT COUNT(*) FROM Productos").fetchone()[0]
     return count
 
 
-def track_all_products():
+async def track_all_products():
     """
-    Rastrea TODOS los productos.
-    Incluye lógica de recuperación ante archivos de bloqueo 'zombie'.
+    Rastrea TODOS los productos usando paralelismo por tienda.
     """
-    log.info("Solicitud de tracking para TODOS los productos...")
+    log.info("Solicitud de tracking para TODOS los productos (Modo Paralelo por Tienda)...")
 
-    # --- LÓGICA MEJORADA DEL CANDADO ---
+    # --- LÓGICA DEL CANDADO ---
     if LOCK_FILE.exists():
-        # Verificar antigüedad del archivo
         try:
             file_age = time.time() - LOCK_FILE.stat().st_mtime
-            # Si el archivo tiene más de 2 horas (7200 segundos), es un zombie de un corte de luz
             if file_age > 7200:
-                log.warning(
-                    f"⚠️ Archivo de bloqueo antiguo encontrado ({int(file_age / 60)} mins). Eliminando candado zombie.")
+                log.warning(f"⚠️ Eliminando candado zombie ({int(file_age / 60)} mins).")
                 LOCK_FILE.unlink()
             else:
-                log.warning("Ya hay un proceso de tracking reciente en ejecución. Omitiendo este ciclo.")
+                log.warning("Ya hay un proceso de tracking reciente. Omitiendo.")
                 return False
         except Exception as e:
-            log.error(f"Error verificando archivo de bloqueo: {e}. Forzando eliminación.")
             if LOCK_FILE.exists(): LOCK_FILE.unlink()
 
     try:
         LOCK_FILE.touch()
-        log.info("Archivo de bloqueo creado. Iniciando scrape...")
+        
+        all_products = []
+        with database.db_pool.get_conn() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT id, url, tienda FROM Productos")
+            all_products = cursor.fetchall()
 
-        conn = database.get_db_conn()
-        cursor = conn.cursor()
-        cursor.execute("SELECT id, url, tienda FROM Productos")
-        productos = cursor.fetchall()
-        conn.close()
-
-        if not productos:
-            log.info("No hay productos en la BD para revisar.")
+        if not all_products:
+            log.info("No hay productos en la BD.")
             return True
 
-        log.info(f"Se van a revisar {len(productos)} producto(s).")
+        # Agrupar por tienda
+        store_queues = {}
+        for prod in all_products:
+            tienda = prod[2]
+            if tienda not in store_queues:
+                store_queues[tienda] = []
+            store_queues[tienda].append(prod)
 
-        for producto in productos:
-            producto_id, producto_url, tienda = producto
-            _scrape_and_save(producto_id, producto_url, tienda)
-            log.info(f"Esperando {POST_SCRAPE_SLEEP} segundos...")
-            time.sleep(POST_SCRAPE_SLEEP)
+        log.info(f"Plan de ejecución: {len(store_queues)} tiendas detectadas.")
 
-        log.info("\n---[ TRACKING COMPLETO ]---")
+        # Crear tareas asíncronas (una por tienda)
+        tasks = []
+        for store_name, products in store_queues.items():
+            tasks.append(process_store_products(store_name, products))
+
+        # Ejecutar todas las tiendas en paralelo
+        await asyncio.gather(*tasks)
+
+        log.info("\n---[ TRACKING COMPLETO (PARALELO) ]---")
         return True
 
     except Exception as e:
-        log.critical(f"Ocurrió un error fatal durante track_all_products: {e}", exc_info=True)
+        log.critical(f"Error fatal en track_all_products: {e}", exc_info=True)
         return False
 
     finally:
         if LOCK_FILE.exists():
             LOCK_FILE.unlink()
-            log.info("Archivo de bloqueo eliminado. Proceso terminado.")

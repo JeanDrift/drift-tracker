@@ -1,18 +1,29 @@
 import re
 from bs4 import BeautifulSoup
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
 
-
-def parse(html):
+def parse(driver):
     """
-    Analiza el HTML de una página de producto de La Curacao.
-    (Versión 3: Añade scraping de status).
+    Analiza la página de La Curacao usando Selenium y WebDriverWait.
     Devuelve (titulo, precio, status).
     """
-    if html is None:
-        print("No hay HTML para analizar.")
-        return None, None, "ninguno"  # Devolver 3 valores
+    print("\n--- [Scraper: LaCuracao V3 (Smart Wait)] Iniciando Análisis ---")
+    
+    try:
+        # Esperar inteligentemente a que cargue el título
+        # Selector CSS: span[itemprop='name']
+        WebDriverWait(driver, 10).until(
+            EC.presence_of_element_located((By.CSS_SELECTOR, "span[itemprop='name']"))
+        )
+        print("Elemento clave encontrado. Procesando HTML...")
+    except Exception as e:
+        print(f"Timeout esperando carga de página: {e}")
+        return None, None, "ninguno"
 
-    print("\n--- [Scraper: LaCuracao V3] Iniciando Análisis ---")
+    # Obtenemos el HTML ya cargado
+    html = driver.page_source
     soup = BeautifulSoup(html, 'html.parser')
 
     product_title = None
