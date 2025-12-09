@@ -1,118 +1,117 @@
 import sqlite3
 from pathlib import Path
 import logging
+import queue
+from contextlib import contextmanager
 
 # Configurar un logger para este módulo
 log = logging.getLogger(__name__)
 
 # --- Constantes Centralizadas de la Base de Datos ---
 DB_NAME = "precios.db"
-import sqlite3
-from pathlib import Path
-from contextlib import contextmanager
-from queue import Queue, Empty
-import logging
-
-# Directorio base
 BASE_DIR = Path(__file__).parent
-DB_PATH = BASE_DIR / "precios.db"
-DB_TIMEOUT = 10  # Segundos
+DB_PATH = BASE_DIR / DB_NAME
+DB_TIMEOUT = 60  # Timeout alto para evitar bloqueos en cargas pesadas
 
-log = logging.getLogger('database')
 
-class DatabasePool:
-    def __init__(self, db_path, max_connections=5):
+class SQLiteConnectionPool:
+    """
+    Gestiona un pool de conexiones para SQLite.
+    Permite que múltiples hilos soliciten conexiones sin bloquear el archivo
+    indefinidamente, controlando la concurrencia.
+    """
+
+    def __init__(self, db_path, max_connections=10):
         self.db_path = db_path
-        self.max_connections = max_connections
-        self.pool = Queue(maxsize=max_connections)
-        self._initialize_pool()
-
-    def _create_connection(self):
-        """Crea una nueva conexión configurada."""
-        conn = sqlite3.connect(self.db_path, timeout=DB_TIMEOUT, check_same_thread=False)
-        conn.execute("PRAGMA foreign_keys = ON")
-        conn.execute("PRAGMA journal_mode = WAL")  # Write-Ahead Logging para mejor concurrencia
-        conn.execute("PRAGMA synchronous = NORMAL")
-        return conn
-
-    def _initialize_pool(self):
-        """Llena el pool con conexiones iniciales."""
-        for _ in range(self.max_connections):
-            self.pool.put(self._create_connection())
+        # Usamos una cola para limitar la concurrencia
+        self.slots = queue.Queue(maxsize=max_connections)
+        for _ in range(max_connections):
+            self.slots.put(None)
 
     @contextmanager
     def get_conn(self):
         """
         Context manager para obtener una conexión del pool.
         Uso:
-        with db_pool.get_conn() as conn:
-            cursor = conn.cursor()
-            ...
+            with db_pool.get_conn() as conn:
+                cursor = conn.cursor()
+                ...
         """
+        token = self.slots.get(timeout=120)  # Espera máx 2 mins por un slot libre
         conn = None
         try:
-            conn = self.pool.get(timeout=DB_TIMEOUT)
+            # En SQLite es mejor crear conexiones nuevas por hilo que compartir objetos
+            conn = sqlite3.connect(self.db_path, timeout=DB_TIMEOUT)
+            conn.execute("PRAGMA journal_mode=WAL;")
+            conn.execute("PRAGMA foreign_keys = ON;")
             yield conn
-        except Empty:
-            log.error("Timeout esperando conexión disponible en el pool.")
-            raise Exception("Database pool exhausted")
         except Exception as e:
-            log.error(f"Error de base de datos: {e}")
-            raise
+            log.error(f"Error de BD en el pool: {e}")
+            raise e
         finally:
             if conn:
-                self.pool.put(conn)
-
-    def close_all(self):
-        """Cierra todas las conexiones del pool (al apagar la app)."""
-        while not self.pool.empty():
-            try:
-                conn = self.pool.get_nowait()
                 conn.close()
-            except:
-                pass
+            self.slots.put(token)  # Liberar el slot
 
-# Instancia global del pool
-db_pool = DatabasePool(DB_PATH)
+
+# --- INSTANCIA GLOBAL DEL POOL ---
+# Esta es la variable que scraper_engine.py estaba buscando y no encontraba
+db_pool = SQLiteConnectionPool(DB_PATH)
+
 
 def setup_database():
-    """Crea la tabla si no existe (usando el pool)."""
-    with db_pool.get_conn() as conn:
-        cursor = conn.cursor()
-        
-        # Tabla Productos
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS Productos (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                url TEXT NOT NULL,
-                nombre TEXT,
-                precio_objetivo REAL,
-                precio_inicial REAL,
-                precio_mas_bajo REAL,
-                notificacion_objetivo_enviada BOOLEAN DEFAULT 0,
-                tienda TEXT,
-                status TEXT DEFAULT 'ninguno'
-            )
-        """)
+    """
+    Configura la BD. Esta función crea las tablas si no existen.
+    """
+    if log.hasHandlers():
+        log.info("Asegurando que la base de datos exista y esté actualizada...")
+    else:
+        print("[Database] Asegurando que la base de datos exista...")
 
-        # Tabla HistorialPrecios
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS HistorialPrecios (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                producto_id INTEGER,
-                precio REAL,
-                fecha TEXT,
-                FOREIGN KEY(producto_id) REFERENCES Productos(id)
-            )
-        """)
-        conn.commit()
-    
-    log.info("Base de datos 'precios.db' lista (WAL mode).")
+    # Usamos una conexión directa para el setup
+    conn = sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT)
+    conn.execute("PRAGMA journal_mode=WAL;")
+    conn.execute("PRAGMA foreign_keys = ON;")
 
-# Wrapper para compatibilidad (aunque se recomienda usar db_pool.get_conn)
+    cursor = conn.cursor()
+
+    # Tabla de Productos
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS Productos (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        url TEXT NOT NULL UNIQUE,
+        nombre TEXT,
+        tienda TEXT,
+        precio_inicial REAL,
+        precio_objetivo REAL,
+        notificacion_objetivo_enviada BOOLEAN DEFAULT 0,
+        status TEXT DEFAULT 'ninguno',
+        precio_mas_bajo REAL
+    )
+    ''')
+    # Tabla de Historial
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS HistorialPrecios (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        producto_id INTEGER,
+        precio REAL,
+        fecha DATETIME,
+        FOREIGN KEY (producto_id) REFERENCES Productos (id) ON DELETE CASCADE
+    )
+    ''')
+    conn.commit()
+    conn.close()
+
+    if log.hasHandlers():
+        log.info(f"Base de datos '{DB_NAME}' lista y optimizada (WAL).")
+
+
 def get_db_conn():
     """
-    DEPRECATED: Usar db_pool.get_conn() en su lugar.
-    Retorna una conexión nueva (no del pool) para casos legacy.
+    Establece conexión directa con la BD.
+    Mantenida para compatibilidad con bot_manager.py y funciones simples.
     """
-    return sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT)
+    conn = sqlite3.connect(DB_PATH, timeout=DB_TIMEOUT)
+    conn.execute("PRAGMA journal_mode=WAL;")
+    conn.execute("PRAGMA foreign_keys = ON")
+    return conn

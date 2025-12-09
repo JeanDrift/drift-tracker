@@ -71,47 +71,42 @@ def detect_store(url):
 
 
 # ==========================================================
-# --- FUNCIONES AUXILIARES (NUEVO) ---
+# --- FUNCIONES AUXILIARES ---
 # ==========================================================
 
 async def show_single_product(context: ContextTypes.DEFAULT_TYPE, chat_id, product_id):
     """
     Función reutilizable para mostrar la tarjeta de UN solo producto.
-    Se usa al agregar, actualizar o listar.
     """
-    prod = None
-    with database.db_pool.get_conn() as conn:
-        cursor = conn.cursor()
+    conn = database.get_db_conn()
+    cursor = conn.cursor()
 
-        # Consultamos datos incluyendo la URL
-        query = """
-        SELECT
-            P.id, P.nombre, P.precio_objetivo, P.status, P.precio_mas_bajo, P.url,
-            (SELECT H.precio FROM HistorialPrecios H
-             WHERE H.producto_id = P.id
-             ORDER BY H.fecha DESC
-             LIMIT 1) AS ultimo_precio
-        FROM Productos P
-        WHERE P.id = ?
-        """
-        cursor.execute(query, (product_id,))
-        prod = cursor.fetchone()
+    query = """
+    SELECT
+        P.id, P.nombre, P.precio_objetivo, P.status, P.precio_mas_bajo, P.url,
+        (SELECT H.precio FROM HistorialPrecios H
+         WHERE H.producto_id = P.id
+         ORDER BY H.fecha DESC
+         LIMIT 1) AS ultimo_precio
+    FROM Productos P
+    WHERE P.id = ?
+    """
+    cursor.execute(query, (product_id,))
+    prod = cursor.fetchone()
+    conn.close()
 
     if not prod:
         await context.bot.send_message(chat_id=chat_id, text=f"⚠️ No se encontraron datos para el ID {product_id}.")
         return
 
-    # Desempaquetar datos
     pid, nombre, objetivo, status, precio_mas_bajo, url, ultimo_precio = prod
 
-    # Formatear textos
     nombre_str = nombre if nombre else "(Pendiente de rastrear)"
     objetivo_str = f"S/ {objetivo}" if objetivo else "No fijado"
     precio_str = f"S/ {ultimo_precio}" if ultimo_precio else "Aún no trackeado"
     precio_mas_bajo_str = f"S/ {precio_mas_bajo}" if precio_mas_bajo else "N/A"
     status_str = status.capitalize() if status else "Ninguno"
 
-    # Icono de status
     status_icon = "🟢" if status == "disponible" else "🔴" if status == "no disponible" else "⚪"
 
     message = (
@@ -123,7 +118,6 @@ async def show_single_product(context: ContextTypes.DEFAULT_TYPE, chat_id, produ
         f"🎯 *Meta:* {objetivo_str}"
     )
 
-    # --- BOTONES (Ahora son 4) ---
     keyboard = [
         [
             InlineKeyboardButton("🎯 Fijar Meta", callback_data=f"set_{pid}"),
@@ -131,7 +125,7 @@ async def show_single_product(context: ContextTypes.DEFAULT_TYPE, chat_id, produ
         ],
         [
             InlineKeyboardButton("🔄 Actualizar", callback_data=f"update_{pid}"),
-            InlineKeyboardButton("🔗 Ver Producto", url=url)  # <--- ¡BOTÓN DE ENLACE!
+            InlineKeyboardButton("🔗 Ver Producto", url=url)
         ]
     ]
 
@@ -156,24 +150,26 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def list_products(update: Update, context: ContextTypes.DEFAULT_TYPE):
     log.info("Comando /lista recibido.")
 
-    # Obtenemos solo los IDs para luego usar la función auxiliar
-    rows = []
-    with database.db_pool.get_conn() as conn:
+    try:
+        conn = database.get_db_conn()
         cursor = conn.cursor()
         cursor.execute("SELECT id FROM Productos")
         rows = cursor.fetchall()
+        conn.close()
 
-    if not rows:
-        await update.message.reply_text("No hay productos en la base de datos.")
-        return
+        if not rows:
+            await update.message.reply_text("No hay productos en la base de datos.")
+            return
 
-    await update.message.reply_text(f"--- 📦 LISTA DE {len(rows)} PRODUCTOS ---")
+        await update.message.reply_text(f"--- 📦 LISTA DE {len(rows)} PRODUCTOS ---")
 
-    # Reutilizamos la función para mostrar cada tarjeta
-    for row in rows:
-        await show_single_product(context, update.effective_chat.id, row[0])
-        # Pequeña pausa para no saturar si hay muchos
-        await asyncio.sleep(0.2)
+        for row in rows:
+            await show_single_product(context, update.effective_chat.id, row[0])
+            await asyncio.sleep(0.2)
+
+    except Exception as e:
+        log.error(f"Error en /lista: {e}")
+        await update.message.reply_text("Ocurrió un error al obtener la lista.")
 
 
 async def add_product(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -188,23 +184,20 @@ async def add_product(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Tienda no reconocida.")
         return
 
+    conn = database.get_db_conn()
+    cursor = conn.cursor()
     try:
-        product_id = None
-        with database.db_pool.get_conn() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                "INSERT INTO Productos (url, tienda, status, notificacion_objetivo_enviada) VALUES (?, ?, 'ninguno', 0)",
-                (url, tienda)
-            )
-            conn.commit()
-            product_id = cursor.lastrowid
+        cursor.execute(
+            "INSERT INTO Productos (url, tienda, status, notificacion_objetivo_enviada) VALUES (?, ?, 'ninguno', 0)",
+            (url, tienda)
+        )
+        conn.commit()
+        product_id = cursor.lastrowid
 
         await update.message.reply_text(f"✅ Producto añadido (ID: {product_id}). Procesando...")
 
-        # Ejecutar tracking en segundo plano
         await asyncio.to_thread(scraper_engine.track_single_product, product_id)
 
-        # --- ¡NUEVO! MOSTRAR LA TARJETA AL FINALIZAR ---
         await update.message.reply_text("✅ Proceso finalizado. Aquí tienes el resultado:")
         await show_single_product(context, update.effective_chat.id, product_id)
 
@@ -213,9 +206,14 @@ async def add_product(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         log.error(f"Error en /agregar: {e}", exc_info=True)
         await update.message.reply_text("Error interno.")
+    finally:
+        conn.close()
 
 
 async def update_all_products(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Fuerza el tracking de todos los productos.
+    """
     log.info("Comando /actualizar recibido.")
     count = scraper_engine.get_product_count()
     if count == 0:
@@ -224,17 +222,25 @@ async def update_all_products(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     total_seconds = count * (scraper_engine.SCRAPING_WAIT_TIME + scraper_engine.POST_SCRAPE_SLEEP)
     minutes = total_seconds // 60
-    
-    query = update.callback_query
-    if query:
-        try:
-            await query.answer()
-        except:
-            pass
-        data = query.data
-    else:
-        data = ""
 
+    await update.message.reply_text(
+        f"Actualizando {count} productos.\nEstimado: ~{minutes} min.\nTe avisaré al terminar."
+    )
+
+    # --- CORRECCIÓN AQUÍ: Llamamos a track_all_products sin argumentos ---
+    await asyncio.to_thread(scraper_engine.track_all_products)
+
+    await update.message.reply_text("✅ Actualización masiva completa.")
+
+
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    try:
+        await query.answer()
+    except:
+        pass
+
+    data = query.data
     if data == "cancel_delete":
         await query.edit_message_text("Operación cancelada.")
         return
@@ -242,26 +248,14 @@ async def update_all_products(update: Update, context: ContextTypes.DEFAULT_TYPE
     if data.startswith("del_confirm_"):
         try:
             product_id = int(data.split('_')[2])
-            with database.db_pool.get_conn() as conn:
-                cursor = conn.cursor()
-                cursor.execute("DELETE FROM Productos WHERE id = ?", (product_id,))
-                conn.commit()
+            conn = database.get_db_conn()
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM Productos WHERE id = ?", (product_id,))
+            conn.commit()
+            conn.close()
             await query.edit_message_text(f"🗑 Producto ID {product_id} eliminado.")
         except Exception as e:
             log.error(f"Error eliminando: {e}")
-        return
-
-    # Si es comando /actualizar (data vacía)
-    if not data:
-        await update.message.reply_text(f"🔄 Iniciando actualización masiva de {count} productos...")
-        await asyncio.to_thread(scraper_engine.track_all_products) # Esto ahora es async, pero track_all_products en scraper_engine es async def. 
-        # Wait, scraper_engine.track_all_products is async. asyncio.to_thread runs sync functions.
-        # We should await it directly if it's async.
-        # But wait, bot_manager calls it via asyncio.to_thread? No, previously it was:
-        # await scraper_engine.track_all_products()
-        # Let's fix this.
-        await scraper_engine.track_all_products()
-        await update.message.reply_text("✅ Actualización masiva completada.")
         return
 
     try:
@@ -284,11 +278,7 @@ async def update_all_products(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     elif action == "update":
         await query.message.reply_text(f"⏳ Actualizando ID {product_id}...")
-
-        # Tracking en segundo plano
         await asyncio.to_thread(scraper_engine.track_single_product, product_id)
-
-        # --- ¡NUEVO! MOSTRAR LA TARJETA ACTUALIZADA ---
         await show_single_product(context, update.effective_chat.id, product_id)
 
 
@@ -297,17 +287,16 @@ async def receive_target_price(update: Update, context: ContextTypes.DEFAULT_TYP
         new_price = float(update.message.text)
         product_id = context.user_data['product_id_to_set']
 
-        with database.db_pool.get_conn() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                "UPDATE Productos SET precio_objetivo = ?, notificacion_objetivo_enviada = 0 WHERE id = ?",
-                (new_price, product_id)
-            )
-            conn.commit()
+        conn = database.get_db_conn()
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE Productos SET precio_objetivo = ?, notificacion_objetivo_enviada = 0 WHERE id = ?",
+            (new_price, product_id)
+        )
+        conn.commit()
+        conn.close()
 
         await update.message.reply_text(f"✅ Meta actualizada.")
-
-        # --- ¡NUEVO! MOSTRAR LA TARJETA CON LA NUEVA META ---
         await show_single_product(context, update.effective_chat.id, product_id)
 
     except ValueError:
@@ -325,8 +314,6 @@ async def cancel_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE
     await update.message.reply_text("Operación cancelada.")
     return ConversationHandler.END
 
-# Alias para el handler de botones
-button_handler = update_all_products
 
 # ==========================================================
 # --- Función Principal ---
@@ -343,7 +330,7 @@ def main():
     log.info("Iniciando el bot...")
     user_filter = filters.User(user_id=int(CHAT_ID))
 
-    # Timeouts aumentados para estabilidad
+    # Timeouts aumentados
     request = HTTPXRequest(connection_pool_size=8, connect_timeout=60, read_timeout=60)
 
     application = Application.builder().token(TELEGRAM_TOKEN).request(request).build()
@@ -361,7 +348,6 @@ def main():
     application.add_handler(CommandHandler("agregar", add_product, filters=user_filter))
     application.add_handler(CommandHandler("actualizar", update_all_products, filters=user_filter))
 
-    # Manejador genérico de botones
     application.add_handler(CallbackQueryHandler(button_handler, pattern='^(del_|cancel_delete|update_)'))
 
     log.info("Bot escuchando...")
