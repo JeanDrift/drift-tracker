@@ -7,8 +7,8 @@ def detect_store(url):
     domain = urlparse(url).netloc.lower()
     if 'mercadolibre' in domain: return 'MercadoLibre'
     if 'lacuracao' in domain: return 'LaCuracao'
-    if 'falabella' in domain: return 'Falabella'
-    if 'ripley' in domain: return 'Ripley'
+    if 'lg.com' in domain: return 'LG'
+    if 'memorykings' in domain: return 'MemoryKings'
     return None
 
 
